@@ -11,7 +11,7 @@ Parameters:
       - prod
   ProjectName:
     Type: String
-
+  
 Resources:
   s3Bucket:
     Type: AWS::S3::Bucket
@@ -53,7 +53,7 @@ Resources:
       Timeout: 30
       Environment:
         Variables:
-          GLUE_CRAWLER: !Ref glueCSVCrawler
+          TRIGGER: !Ref glueCrawlerCSVTrigger
       Role: !GetAtt LambdaCrawlerRole.Arn
 
   LambdaCrawlerRole:
@@ -68,17 +68,28 @@ Resources:
             Service: lambda.amazonaws.com
           Action: sts:AssumeRole
       Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
       - PolicyName: !Sub ${Stage}-lambda-function-policy-${ProjectName}
-        PolicyDocument: 
-          Version: "2012-10-17"
+        PolicyDocument:
+          Version: 2012-10-17
           Statement:
-          - Effect: Allow
-            Action: s3:*
-            Resource: "*"
-          - Effect: Allow
-            Action: glue:*
-            Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource:
+                - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}/*
+                - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}
+            - Effect: Allow
+              Action: glue:StartTrigger
+              Resource: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:trigger/*
+            - Effect: Allow
+              Action: glue:ListTriggers
+              Resource: "*"
         
   LambdaCrawlerPermission:
     Type: AWS::Lambda::Permission
@@ -103,51 +114,11 @@ Resources:
       DatabaseInput:
         Name: output
 
-  glueCrawlerRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${Stage}-glue-crawler-role-${ProjectName}
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-        - Effect: Allow
-          Principal:
-            Service: glue.amazonaws.com
-          Action: sts:AssumeRole
-      Path: "/"
-      Policies:
-      - PolicyName: GlueCrawlerPolicy
-        PolicyDocument: 
-          Version: 2012-10-17
-          Statement:
-          - Effect: Allow
-            Action:
-            - logs:CreateLogGroup
-            - logs:CreateLogStream
-            - logs:PutLogEvents
-            Resource: "*"
-          - Effect: Allow
-            Action:
-            - s3:ListBucket
-            - s3:GetObject
-            - s3:PutObject
-            - s3:DeleteObject
-            Resource:
-            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}/*
-            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}
-          - Effect: Allow
-            Action:
-            - glue:*
-            Resource:
-            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
-            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*
-            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/*
-
   glueCSVCrawler:
     Type: AWS::Glue::Crawler
     Properties:
       Name: !Sub ${Stage}-csv-crawler-${ProjectName}
-      Role: !GetAtt glueCrawlerRole.Arn
+      Role: !GetAtt glueRole.Arn
       Description: Glue crawler for customer data
       DatabaseName: !Ref glueInputDatabase
       Targets:
@@ -178,7 +149,7 @@ Resources:
     Type: AWS::Glue::Crawler
     Properties:
       Name: !Sub ${Stage}-parquet-crawler-${ProjectName}
-      Role: !GetAtt glueCrawlerRole.Arn
+      Role: !GetAtt glueRole.Arn
       Description: Glue crawler for customer data
       DatabaseName: !Ref glueOutputDatabase
       Targets:
@@ -205,10 +176,10 @@ Resources:
         }
       TablePrefix: parquet_
 
-  glueJobRole:
+  glueRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${Stage}-glue-job-role-${ProjectName}
+      RoleName: !Sub ${Stage}-glue-role-${ProjectName}
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -217,8 +188,63 @@ Resources:
             Service: glue.amazonaws.com
           Action: sts:AssumeRole
       Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
       Policies:
-      - PolicyName: !Sub ${Stage}-glue-job-policy-${ProjectName}
+      - PolicyName: !Sub ${Stage}-glue-bucket-policy-${ProjectName}
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource:
+                - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}/*
+                - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}
+      - PolicyName: !Sub ${Stage}-glue-scripts-policy-${ProjectName}
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetObject
+              Resource:
+                - !ImportValue 
+                  'Fn::Sub': ${Stage}-jenkins-onboarding-assets-bucket
+                - !Join
+                  - ''
+                  - - !ImportValue 
+                        'Fn::Sub': ${Stage}-jenkins-onboarding-assets-bucket
+                    - "/*"
+      - PolicyName: !Sub ${Stage}-glue-Database-policy-${ProjectName}
+        PolicyDocument: 
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - glue:Update*
+                - glue:Create*
+                - glue:Import*
+              Resource: 
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${glueInputDatabase}
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${glueOutputDatabase}
+      - PolicyName: !Sub ${Stage}-glue-table-policy-${ProjectName}
+        PolicyDocument: 
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - glue:Update*
+                - glue:Create*
+                - glue:Import*
+              Resource: 
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${glueInputDatabase}
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${glueOutputDatabase}
+      - PolicyName: !Sub ${Stage}-glue-logs-policy-${ProjectName}
         PolicyDocument: 
           Version: "2012-10-17"
           Statement:
@@ -228,35 +254,11 @@ Resources:
             - logs:CreateLogStream
             - logs:PutLogEvents
             Resource: "*"
-          - Effect: Allow
-            Action:
-            - s3:ListBucket
-            - s3:GetObject
-            - s3:PutObject
-            - s3:DeleteObject
-            Resource:
-            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}/*
-            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}
-            - !ImportValue 
-              'Fn::Sub': ${Stage}-jenkins-onboarding-assets-bucket
-            - !Join
-              - ''
-              - - !ImportValue 
-                    'Fn::Sub': ${Stage}-jenkins-onboarding-assets-bucket
-                - "/*"
-
-          - Effect: Allow
-            Action:
-            - glue:*
-            Resource:
-            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
-            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/input
-            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/input/*
   
   glueJob:
     Type: AWS::Glue::Job
     Properties:
-      Role: !Ref glueJobRole
+      Role: !Ref glueRole
       Command:
         Name: glueetl
         ScriptLocation: glueScript/script.py
@@ -270,6 +272,51 @@ Resources:
         "--enable-continuous-log-filter": "true"
         "--enable-metrics": "true"
         "--output_path": !Sub "s3://${Stage}-buckets3-${ProjectName}/output/customers"
+
+  glueCrawlerCSVTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub ${Stage}-start-workflow-crawler-csv-trigger-${ProjectName}
+      Type: ON_DEMAND
+      Actions:
+        - CrawlerName: !Ref glueCSVCrawler
+      WorkflowName: !Ref glueWorkflow
+
+  glueJobCSVParquetTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub ${Stage}-glue-job-trigger-${ProjectName}
+      Type: CONDITIONAL
+      StartOnCreation: true
+      Actions:
+        - JobName: !Ref glueJob
+      Predicate:
+        Conditions:
+          - CrawlerName: !Ref glueCSVCrawler
+            LogicalOperator: EQUALS
+            CrawlState: SUCCEEDED
+      WorkflowName: !Ref glueWorkflow
+  
+  glueCrawlerParquetTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub ${Stage}-crawler-parquet-trigger-${ProjectName}
+      Type: CONDITIONAL
+      StartOnCreation: true
+      Actions:
+        - CrawlerName: !Ref glueParquetCrawler
+      Predicate:
+        Conditions:
+          - JobName: !Ref glueJob
+            LogicalOperator: EQUALS
+            State: SUCCEEDED
+      WorkflowName: !Ref glueWorkflow
+
+  glueWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Description: GlueWorkflow pipeline 
+      Name: !Sub ${Stage}-glue-workflow2-${ProjectName}
 
 Outputs:
   s3Bucket:
