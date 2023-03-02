@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters: 
+  Stage:
+    Type: String
+    AllowedValues:
+      - sandbox
+      - dev
+      - qa
+      - demo
+      - prod
+  ProjectName:
+    Type: String
+
+Resources:
+  s3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Stage}-buckets3-${ProjectName}
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: "input/customers/"
+                  - Name: suffix
+                    Value: .csv
+            Function: !GetAtt LambdaCrawlerFunction.Arn
+    DependsOn:
+      - LambdaCrawlerPermission
+  
+  LambdaCrawlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Stage}-lambda-crawler-trigger-${ProjectName}
+      Code: lambdaCode
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Description: serverless lambda to trigger glue crawler
+      Timeout: 30
+      Environment:
+        Variables:
+          GLUE_CRAWLER: !Ref glueCSVCrawler
+      Role: !GetAtt LambdaCrawlerRole.Arn
+
+  LambdaCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Stage}-lambda-function-role-${ProjectName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Sub ${Stage}-lambda-function-policy-${ProjectName}
+        PolicyDocument: 
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action: s3:*
+            Resource: "*"
+          - Effect: Allow
+            Action: glue:*
+            Resource: "*"
+        
+  LambdaCrawlerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaCrawlerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:s3:::${Stage}-buckets3-${ProjectName}"
+
+  glueInputDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: input
+
+  glueOutputDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: output
+
+  glueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Stage}-glue-crawler-role-${ProjectName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: glue.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: GlueCrawlerPolicy
+        PolicyDocument: 
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: "*"
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            Resource:
+            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}/*
+            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}
+          - Effect: Allow
+            Action:
+            - glue:*
+            Resource:
+            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
+            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*
+            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/*
+
+  glueCSVCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${Stage}-csv-crawler-${ProjectName}
+      Role: !GetAtt glueCrawlerRole.Arn
+      Description: Glue crawler for customer data
+      DatabaseName: !Ref glueInputDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${Stage}-buckets3-${ProjectName}/input/customers
+            Exclusions: []
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DELETE_FROM_DATABASE
+      Configuration: |
+        {
+          "Version":1.0,
+          "CrawlerOutput":{
+            "Partitions":{
+              "AddOrUpdateBehavior":"InheritFromTable"
+            },
+            "Tables":{
+              "AddOrUpdateBehavior":"MergeNewColumns"
+            }
+          },
+          "Grouping":{
+            "TableGroupingPolicy":"CombineCompatibleSchemas"
+          }
+        }
+      TablePrefix: csv_
+
+  glueParquetCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${Stage}-parquet-crawler-${ProjectName}
+      Role: !GetAtt glueCrawlerRole.Arn
+      Description: Glue crawler for customer data
+      DatabaseName: !Ref glueOutputDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${Stage}-buckets3-${ProjectName}/output/customers
+            Exclusions: []
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DELETE_FROM_DATABASE
+      Configuration: |
+        {
+          "Version":1.0,
+          "CrawlerOutput":{
+            "Partitions":{
+              "AddOrUpdateBehavior":"InheritFromTable"
+            },
+            "Tables":{
+              "AddOrUpdateBehavior":"MergeNewColumns"
+            }
+          },
+          "Grouping":{
+            "TableGroupingPolicy":"CombineCompatibleSchemas"
+          }
+        }
+      TablePrefix: parquet_
+
+  glueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Stage}-glue-job-role-${ProjectName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: glue.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Sub ${Stage}-glue-job-policy-${ProjectName}
+        PolicyDocument: 
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: "*"
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            Resource:
+            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}/*
+            - !Sub arn:aws:s3:::${Stage}-buckets3-${ProjectName}
+            - !ImportValue 
+              'Fn::Sub': ${Stage}-jenkins-onboarding-assets-bucket
+            - !Join
+              - ''
+              - - !ImportValue 
+                    'Fn::Sub': ${Stage}-jenkins-onboarding-assets-bucket
+                - "/*"
+
+          - Effect: Allow
+            Action:
+            - glue:*
+            Resource:
+            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
+            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/input
+            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/input/*
+  
+  glueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Role: !Ref glueJobRole
+      Command:
+        Name: glueetl
+        ScriptLocation: glueScript/script.py
+      Description: convert csv to parquet
+      GlueVersion: '3.0'
+      MaxCapacity: 10
+      MaxRetries: 0
+      Name: !Sub ${Stage}-glue-job-${ProjectName}
+      DefaultArguments:
+        "--enable-continuous-cloudwatch-log": "true"
+        "--enable-continuous-log-filter": "true"
+        "--enable-metrics": "true"
+        "--output_path": !Sub "s3://${Stage}-buckets3-${ProjectName}/output/customers"
+
+Outputs:
+  s3Bucket:
+    Description: The name of the bucket
+    Value: !Ref s3Bucket
