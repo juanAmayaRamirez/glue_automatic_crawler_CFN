@@ -56,7 +56,8 @@ datasynk4 = glueContext.write_dynamic_frame.from_options(
     frame=dropnullfields3,
     connection_type= "s3",
     connection_options = {
-        "path": args['output_path']
+        "path": args['output_path'],
+        "compression": "uncompressed"
     },
     format = "parquet",
     transformation_ctx = "datasynk4"
